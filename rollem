@@ -1,0 +1,226 @@
+#!/usr/bin/env ruby
+
+# rollem
+# dice nova calculator
+# version 1.0 beta
+
+# TODO for V2: disentangle view from model; various logic refactoring
+
+
+require 'colorized_string'
+require 'optparse'
+require 'psych'
+require 'tty-prompt'
+
+
+options = {}
+OptionParser.new do |opts|
+  opts.banner = "rollem v1.0 beta - dice nova calculator\nusage: rollem [options]"
+  opts.on("-iFILE", "--input=FILE", "Input character file (YAML [name: [method: nova])]") do |f|
+    options[:filename] = f
+  end
+  opts.on("-h", "--help", "Show #{help} summary") do
+    puts opts
+    exit
+  end
+end.parse!
+
+
+
+class BuildCharacters
+  attr_accessor :characters
+
+  def initialize(file)
+    if file && File.exist?(file)
+      initialize_from_file(file)
+    else
+      initialize_empty
+    end
+  end
+  def initialize_empty
+    @characters = {}
+  end
+  def initialize_from_file(file)
+    File.open(file) do |f|
+       @characters = Psych.safe_load(f)
+    end
+  end
+
+end
+
+
+
+class Nova
+  REGEXP_SPLIT_ID = /(?<name>[\w\-]*)(?:[\s\:]*)(?<method>[\w\-]*)/
+  REGEXP_SPLIT_NOVA = /(?>(?<roll>[\+\-]?\d*+d\d+)|(?:[\+\-]?\d*d)|(?<addend>[\+\-]?\d+))/i
+  attr_accessor :components, :description, :type
+
+  def initialize(roll)
+    if roll[0] == '#'
+      @type = :id
+      initialize_roll_by_id(roll[1..])
+    else
+      @type = :nova
+      initialize_roll_nova(roll)
+    end
+  end
+  def initialize_roll_by_id(roll)
+    character_data = determine_character_data(roll)
+    character_name = determine_character_name(character_data)
+    character_method = determine_character_method(character_data, character_name)
+    roll = (character_method.values)[0]
+    initialize_roll_nova(roll)
+  end
+  def initialize_roll_nova(roll)
+    @description = roll.gsub(/\s/,'')
+    @components = determine_roll_components(@description).map { |component| NovaComponent.new(component) }
+  end
+
+  def report
+    @components.map { |nova_component| nova_component.report }
+  end
+  def result
+    sprintf('%3s%4d', "=", sum)
+  end
+  def sum
+    @components.map { |nova_component| nova_component.result }.sum
+  end
+
+  private
+  def determine_character_data(roll)
+    character_data = roll.match(REGEXP_SPLIT_ID)
+    if (character_data[:name]) == '' || (character_data[:method] == '')
+      raise InvalidRoll
+    end
+    character_data
+  end
+  def determine_character_method(character_data, character_name)
+    character_methods = (character_name.values)[0]
+    character_method = character_methods.select { |k,v| k.downcase == character_data[:method] }
+    if character_method == {}
+      raise InvalidRoll
+    end
+    character_method
+  end
+  def determine_character_name(character_data)
+    character_name = CHARACTERS.select { |k,v| k.downcase == character_data[:name] }
+    if character_name == {}
+      raise InvalidRoll
+    end
+    character_name
+  end
+  def determine_roll_components(description)
+    roll_components = []
+    description.scan(REGEXP_SPLIT_NOVA) do |roll, addend|
+      roll_components << {roll: roll, addend: addend}.reject { |k,v| v == nil }
+    end
+    if (roll_components == []) || (roll_components.include?({}))
+      raise InvalidRoll
+    end
+    roll_components
+  end
+end
+
+
+
+class NovaComponent
+  REGEXP_LEADING_OPERAND = /\A[\+\-]/
+  REGEXP_PARSE_ADDEND = /(?<operand>[\+\-])?(?<modifier>\d*)/i
+  REGEXP_PARSE_ROLL = /(?<operand>[\+\-])?(?<multiple>\d*)d(?<diemax>\d*)/i
+  attr_accessor :components, :diemax, :element, :expression, :modifier, :multiple, :operand, :result, :type
+
+  def initialize(component)
+    if component.has_key?(:roll)
+      @type = :roll
+      initialize_array_roll(component[:roll])
+    elsif component.has_key?(:addend)
+      @type = :addend
+      initialize_array_addend(component[:addend])
+    end
+  end
+  def initialize_array_addend(addend)
+    @expression = addend
+    @element = addend.gsub(REGEXP_LEADING_OPERAND,'')
+    addend_parsed = addend.match(REGEXP_PARSE_ADDEND)
+    @operand = addend_parsed[:operand] == nil ? '+' : addend_parsed[:operand]
+    @modifier = addend_parsed[:modifier].to_i
+    @components = solve_modifier
+    @result = total
+  end
+  def initialize_array_roll(roll)
+    @expression = "#{roll}"
+    @element = roll.gsub(REGEXP_LEADING_OPERAND,'')
+    roll_parsed = roll.match(REGEXP_PARSE_ROLL)
+    @operand = roll_parsed[:operand] == nil ? '+' : roll_parsed[:operand]
+    @multiple = [1, roll_parsed[:multiple].to_i].sort[-1]
+    @diemax = roll_parsed[:diemax].to_i
+    @components = solve_dice
+    @result = total
+  end
+
+  def report
+    report = sprintf('%7d%11s', @result, [@operand, @element].join(' '))
+    if @type == :roll
+      report.concat(" #{@components}")
+    end
+    report
+  end
+
+  private
+  def solve_dice
+    @multiple.times.map { Random.new.rand(@diemax) + 1 }
+  end
+  def solve_modifier
+    [ @modifier ]
+  end
+  def total
+    case @operand
+    when '+', ''
+      @components.sum
+    when '-'
+      0 - @components.sum
+    end
+  end
+
+end
+
+
+
+class InvalidRoll < StandardError
+end
+
+
+
+CHARACTERS = BuildCharacters.new(options[:filename]).characters
+prompt = TTY::Prompt.new
+
+
+loop do
+  begin
+    # Generate nova from input
+    roll = prompt.ask('>').to_s.downcase
+    if roll == 'bye'
+      break
+    end
+    if roll == 'who'
+      puts CHARACTERS.to_yaml
+    end
+
+    nova = Nova.new(roll)
+
+    # Display nova results
+    # If rolled by #name, then include the nova description
+    if nova.type == :id
+      puts ColorizedString.new("    #{nova.description}").colorize(color: :yellow)
+    end
+    puts nova.report
+    puts ColorizedString.new(nova.result).colorize(color: :yellow)
+
+
+  rescue InvalidRoll
+    puts "do what now?"
+  rescue Interrupt
+    puts "\n"
+    exit
+  end
+end
